@@ -196,6 +196,46 @@ class TestVpn(BaseTestVpn, TestCase):
                 context.exception.message_dict["__all__"][0],
             )
 
+        with self.subTest("QuerySet update raises validation error"):
+            with self.assertRaises(ValidationError):
+                VpnClient.objects.filter(pk=vpnclient.pk).update(auto_cert=False)
+
+        with self.subTest("QuerySet bulk_update raises validation error"):
+            vpnclient.auto_cert = False
+            with self.assertRaises(ValidationError):
+                VpnClient.objects.bulk_update([vpnclient], ["auto_cert"])
+            vpnclient.refresh_from_db()
+
+        with self.subTest("Direct save() raises without clean()"):
+            vpnclient.auto_cert = False
+            with self.assertRaises(ValidationError):
+                vpnclient.save()
+            vpnclient.refresh_from_db()
+
+        with self.subTest("ip_id can be written via save"):
+            from openwisp_ipam.models import IpAddress, Subnet
+            s = Subnet.objects.create(subnet="192.168.100.0/24", name="test-subnet")
+            ip = IpAddress.objects.create(ip_address="192.168.100.2", subnet=s)
+            vpnclient.ip = ip
+            vpnclient.save()
+            
+        with self.subTest("refresh_from_db resets snapshot"):
+            vpnclient.refresh_from_db()
+            vpnclient.auto_cert = False
+            with self.assertRaises(ValidationError):
+                vpnclient.save()
+            vpnclient.refresh_from_db()
+
+    def test_create_with_auto_cert_false(self):
+        c = self._create_config(device=self._create_device())
+        vpn = self._create_vpn()
+        t = self._create_template(
+            name="vpn-test-cert-false", type="vpn", vpn=vpn, auto_cert=False
+        )
+        c.templates.add(t)
+        vpnclient = c.vpnclient_set.first()
+        self.assertFalse(vpnclient.auto_cert)
+
     def test_vpn_cert_and_ca_mismatch(self):
         ca = self._create_ca()
         different_ca = self._create_ca(common_name="different-ca")
@@ -312,16 +352,15 @@ class TestVpn(BaseTestVpn, TestCase):
         with self.subTest(
             'Test VpnClient post_delete handler when "auto_cert" field is set to "False"'  # noqa
         ):
-            t = self._create_template(
-                name="vpn-test-2", type="vpn", vpn=vpn, auto_cert=True
-            )
-            c.templates.add(t)
-            vpnclient = c.vpnclient_set.first()
-            cert = vpnclient.cert
-            # Set auto_cert field to false bypassing validation to test post_delete
-            VpnClient.objects.filter(pk=vpnclient.pk).update(auto_cert=False)
-            vpnclient.refresh_from_db()
-            _assert_vpn_client_cert(cert, vpnclient, 1, 0)
+            # Test the post_delete branch directly by invoking the handler
+            cert = self._create_cert(ca=vpn.ca, name="manual-cert")
+            vpnclient = VpnClient(vpn=vpn, cert=cert, auto_cert=False, config=c)
+            # Verify the cert starts unrevoked
+            self.assertEqual(Cert.objects.filter(pk=cert.pk, revoked=False).count(), 1)
+            # Trigger the handler
+            VpnClient.post_delete(instance=vpnclient)
+            # The cert should not be revoked because auto_cert is False
+            self.assertEqual(Cert.objects.filter(pk=cert.pk, revoked=False).count(), 1)
 
     def test_vpn_client_get_common_name(self):
         vpn = self._create_vpn()
@@ -531,6 +570,37 @@ class TestVpn(BaseTestVpn, TestCase):
             self.assertIn("ca", message_dict)
             self.assertIn("CA is required with this VPN backend", message_dict["ca"])
 
+
+
+    def test_subnet_division_ip_assignment(self):
+        """
+        Integration test verifying that VpnSubnetDivisionRuleType.post_provision_handler
+        successfully writes the ip field and saves without raising an immutability ValidationError.
+        """
+        from openwisp_controller.subnet_division.rule_types.vpn import VpnSubnetDivisionRuleType
+        from openwisp_ipam.models import IpAddress, Subnet
+        
+        c = self._create_config(device=self._create_device())
+        vpn = self._create_vpn()
+        t = self._create_template(
+            name="vpn-test-subnet-div", type="vpn", vpn=vpn, auto_cert=False
+        )
+        c.templates.add(t)
+        vpnclient = c.vpnclient_set.first()
+        
+        # Mock what subnet division provisions
+        s = Subnet.objects.create(subnet="10.10.10.0/24", name="test-subnet-div")
+        ip = IpAddress.objects.create(ip_address="10.10.10.1", subnet=s)
+        provisioned = {"ip_addresses": [ip]}
+        
+        # Trigger the post_provision_handler directly
+        # It assigns instance.ip, runs instance.full_clean(), and instance.save()
+        # This will fail if ip_id is back in IMMUTABLE_FIELDS or if the cache is broken.
+        VpnSubnetDivisionRuleType.post_provision_handler(vpnclient, provisioned)
+        
+        # Verify the IP was successfully assigned and persisted
+        vpnclient.refresh_from_db()
+        self.assertEqual(vpnclient.ip.ip_address, "10.10.10.1")
 
 class TestVpnTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTestCase):
     @mock.patch.object(create_vpn_dh, "delay")

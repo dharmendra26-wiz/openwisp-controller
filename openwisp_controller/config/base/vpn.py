@@ -878,7 +878,40 @@ class AbstractVpn(
         return peers
 
 
+_VPNCLIENT_IMMUTABLE_MSG = _(
+    "VPN client fields cannot be modified after creation. "
+    "To apply changes, remove the template and re-add it."
+)
+
+
+class VpnClientQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError(_VPNCLIENT_IMMUTABLE_MSG)
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError(_VPNCLIENT_IMMUTABLE_MSG)
+
+
+class VpnClientManager(models.Manager.from_queryset(VpnClientQuerySet)):
+    pass
+
+
 class AbstractVpnClient(models.Model):
+    objects = VpnClientManager()
+
+    # ip_id intentionally omitted: subnet_division/rule_types/vpn.py
+    # legitimately assigns ip_id post-creation via full_clean() + save().
+    IMMUTABLE_FIELDS = [
+        "config_id",
+        "template_id",
+        "vpn_id",
+        "cert_id",
+        "auto_cert",
+        "public_key",
+        "private_key",
+        "secret",
+        "vni",
+    ]
     """
     m2m through model
     """
@@ -933,55 +966,36 @@ class AbstractVpnClient(models.Model):
         instance._original_pk = instance.pk
         return instance
 
-    def clean(self, *args, **kwargs):
-        """
-        Validates that VpnClient fields are not modified after creation.
-        If configuration changes are needed, the object should be recreated.
-        """
-        if hasattr(super(), "clean"):
-            super().clean(*args, **kwargs)
-
-        if self._state.adding and self.pk is None:
+    def _assert_immutable(self):
+        if self._state.adding:
             return
 
-        if not self._state.adding and (
-            self.pk is None or self.pk != getattr(self, "_original_pk", None)
-        ):
-            raise ValidationError(
-                _(
-                    "VPN client primary key cannot be modified after creation. "
-                    "To apply changes, remove the template and re-add it."
-                )
+        if getattr(self, "_original_snapshot", None) is None:
+            # _original_pk is set by from_db() and by save() on create.
+            # The `or self.pk` fallback is defensive only.
+            pk = getattr(self, "_original_pk", None) or self.pk
+            self._original_snapshot = (
+                type(self).objects.using(self._state.db).filter(pk=pk).first()
             )
 
-        immutable_fields = [
-            "config_id",
-            "template_id",
-            "vpn_id",
-            "cert_id",
-            "auto_cert",
-            "ip_id",
-            "public_key",
-            "private_key",
-            "secret",
-            "vni",
-        ]
-
-        try:
-            # The object may not exist in the database yet (e.g., edge cases),
-            # so we skip validation if it cannot be found.
-            original = self.__class__.objects.using(self._state.db).get(pk=self.pk)
-        except self.__class__.DoesNotExist:
+        original = self._original_snapshot
+        if original is None:
             return
 
-        for field in immutable_fields:
-            if getattr(self, field) != getattr(original, field):
-                raise ValidationError(
-                    _(
-                        "VPN client fields cannot be modified after creation. "
-                        "To apply changes, remove the template and re-add it."
-                    )
-                )
+        changed = [
+            f for f in self.IMMUTABLE_FIELDS
+            if getattr(self, f) != getattr(original, f)
+        ]
+        if changed:
+            raise ValidationError(_VPNCLIENT_IMMUTABLE_MSG)
+
+    def clean(self, *args, **kwargs):
+        super().clean(*args, **kwargs)
+        self._assert_immutable()
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        self._original_snapshot = None
 
     @cached_property
     def zerotier_member_id(self):
@@ -1015,6 +1029,7 @@ class AbstractVpnClient(models.Model):
     def save(self, *args, **kwargs):
         """Performs automatic provisioning if ``auto_cert`` is True."""
         was_adding = self._state.adding
+        self._assert_immutable()
         if self.auto_cert:
             self._auto_x509()
             self._auto_ip()
@@ -1024,6 +1039,7 @@ class AbstractVpnClient(models.Model):
         result = super().save(*args, **kwargs)
         if was_adding:
             self._original_pk = self.pk
+        self._original_snapshot = None
         return result
 
     def _auto_x509(self):
