@@ -983,8 +983,7 @@ class AbstractVpnClient(models.Model):
             return
 
         changed = [
-            f for f in self.IMMUTABLE_FIELDS
-            if getattr(self, f) != getattr(original, f)
+            f for f in self.IMMUTABLE_FIELDS if getattr(self, f) != getattr(original, f)
         ]
         if changed:
             raise ValidationError(_VPNCLIENT_IMMUTABLE_MSG)

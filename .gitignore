@@ -72,3 +72,4 @@ local_settings.py
 # Pipenv
 Pipfile
 Pipfile.lock
+wsl-venv/

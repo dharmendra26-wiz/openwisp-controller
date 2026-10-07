@@ -214,11 +214,12 @@ class TestVpn(BaseTestVpn, TestCase):
 
         with self.subTest("ip_id can be written via save"):
             from openwisp_ipam.models import IpAddress, Subnet
+
             s = Subnet.objects.create(subnet="192.168.100.0/24", name="test-subnet")
             ip = IpAddress.objects.create(ip_address="192.168.100.2", subnet=s)
             vpnclient.ip = ip
             vpnclient.save()
-            
+
         with self.subTest("refresh_from_db resets snapshot"):
             vpnclient.refresh_from_db()
             vpnclient.auto_cert = False
@@ -570,16 +571,17 @@ class TestVpn(BaseTestVpn, TestCase):
             self.assertIn("ca", message_dict)
             self.assertIn("CA is required with this VPN backend", message_dict["ca"])
 
-
-
     def test_subnet_division_ip_assignment(self):
         """
         Integration test verifying that VpnSubnetDivisionRuleType.post_provision_handler
-        successfully writes the ip field and saves without raising an immutability ValidationError.
+        successfully writes the ip field and saves without raising a ValidationError.
         """
-        from openwisp_controller.subnet_division.rule_types.vpn import VpnSubnetDivisionRuleType
         from openwisp_ipam.models import IpAddress, Subnet
-        
+
+        from openwisp_controller.subnet_division.rule_types.vpn import (
+            VpnSubnetDivisionRuleType,
+        )
+
         c = self._create_config(device=self._create_device())
         vpn = self._create_vpn()
         t = self._create_template(
@@ -587,20 +589,21 @@ class TestVpn(BaseTestVpn, TestCase):
         )
         c.templates.add(t)
         vpnclient = c.vpnclient_set.first()
-        
+
         # Mock what subnet division provisions
         s = Subnet.objects.create(subnet="10.10.10.0/24", name="test-subnet-div")
         ip = IpAddress.objects.create(ip_address="10.10.10.1", subnet=s)
         provisioned = {"ip_addresses": [ip]}
-        
+
         # Trigger the post_provision_handler directly
         # It assigns instance.ip, runs instance.full_clean(), and instance.save()
         # This will fail if ip_id is back in IMMUTABLE_FIELDS or if the cache is broken.
         VpnSubnetDivisionRuleType.post_provision_handler(vpnclient, provisioned)
-        
+
         # Verify the IP was successfully assigned and persisted
         vpnclient.refresh_from_db()
         self.assertEqual(vpnclient.ip.ip_address, "10.10.10.1")
+
 
 class TestVpnTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTestCase):
     @mock.patch.object(create_vpn_dh, "delay")
